@@ -664,3 +664,34 @@ class SQLServerSource(SQLAlchemySource):
             if self.config.convert_urns_to_lowercase
             else qualified_table_name
         )
+
+    def add_profile_metadata(self, inspector: Inspector) -> None:
+        try:
+            with inspector.engine.connect() as conn:
+                for row in conn.execute(
+                    """SELECT
+                        sch.name as table_schema,
+                        t.name as table_name,
+                        SUM(
+                            CASE
+                            WHEN (i.index_id < 2)
+                            THEN (in_row_data_page_count + lob_used_page_count + row_overflow_used_page_count)
+                            ELSE lob_used_page_count + row_overflow_used_page_count
+                            END
+                        ) * 8 * 1024 as table_size
+                        FROM sys.dm_db_partition_stats AS s
+                        JOIN sys.tables AS t ON s.object_id = t.object_id
+                        JOIN sys.indexes AS i ON i.object_id = t.object_id AND s.index_id = i.index_id
+                        JOIN sys.schemas AS sch ON t.schema_id = sch.schema_id
+                        GROUP BY sch.name, t.name
+                    """
+                ):
+                    self.profile_metadata_info.dataset_name_to_storage_bytes[
+                        self.get_identifier(
+                            schema=row.table_schema,
+                            entity=row.table_name,
+                            inspector=inspector,
+                        )
+                    ] = row.table_size
+        except Exception as e:
+            logger.error(f"failed to fetch profile metadata: {e}")
